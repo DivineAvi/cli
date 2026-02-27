@@ -6,14 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
@@ -458,69 +456,6 @@ func runTrailUpdate(w io.Writer, statusStr, title, body, branch string, labelAdd
 
 // defaultBaseBranch is the fallback base branch name when it cannot be determined.
 const defaultBaseBranch = "main"
-
-// AutoCreateTrail creates a trail automatically for the current branch if one doesn't exist.
-// This is called during session start for non-main branches.
-// If prompt is non-empty, its first line is used as the trail title instead of the branch name.
-func AutoCreateTrail(repo *git.Repository, branchName, baseBranch, prompt string) error {
-	store := trail.NewStore(repo)
-
-	existing, err := store.FindByBranch(branchName)
-	if err == nil && existing != nil {
-		return nil // Trail already exists
-	}
-
-	trailID, err := trail.GenerateID()
-	if err != nil {
-		return fmt.Errorf("failed to generate trail ID: %w", err)
-	}
-
-	authorName := getTrailAuthor(repo)
-	now := time.Now()
-
-	title := titleFromPrompt(prompt)
-	if title == "" {
-		title = trail.HumanizeBranchName(branchName)
-	}
-
-	metadata := &trail.Metadata{
-		TrailID:   trailID,
-		Branch:    branchName,
-		Base:      baseBranch,
-		Title:     title,
-		Status:    trail.StatusInProgress,
-		Author:    authorName,
-		Assignees: []string{},
-		Labels:    []string{},
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-
-	if err := store.Write(metadata, nil, nil); err != nil {
-		return fmt.Errorf("failed to create trail: %w", err)
-	}
-
-	logCtx := context.Background()
-	logging.Info(logCtx, "auto-created trail for branch",
-		slog.String("branch", branchName),
-		slog.String("trail_id", trailID.String()))
-	return nil
-}
-
-// titleFromPrompt extracts a trail title from the user's prompt.
-// Uses the first line, trimmed and truncated to 80 characters.
-// Returns empty string if prompt is empty.
-func titleFromPrompt(prompt string) string {
-	if prompt == "" {
-		return ""
-	}
-	line, _, _ := strings.Cut(prompt, "\n")
-	title := strings.TrimSpace(line)
-	if len(title) > 80 {
-		title = title[:77] + "..."
-	}
-	return title
-}
 
 // hasFlag is a simple helper that checks os.Args for --flag presence.
 // Used to distinguish between "flag not provided" and "flag provided with empty value".
