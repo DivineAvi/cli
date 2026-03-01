@@ -551,6 +551,24 @@ func TestApplyTransition_StopsOnFirstHandlerError(t *testing.T) {
 	assert.False(t, handler.warnStaleSessionCalled, "should stop on first error")
 }
 
+func TestApplyTransition_UpdateLastInteractionRunsDespiteHandlerError(t *testing.T) {
+	t.Parallel()
+
+	state := &State{Phase: PhaseEnded}
+	handler := &mockActionHandler{returnErr: errors.New("condense failed")}
+	result := TransitionResult{
+		NewPhase: PhaseEnded,
+		Actions:  []Action{ActionCondenseIfFilesTouched, ActionUpdateLastInteraction},
+	}
+
+	err := ApplyTransition(context.Background(), state, result, handler)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "condense failed")
+	assert.True(t, handler.condenseIfFilesTouchedCalled)
+	require.NotNil(t, state.LastInteractionTime, "UpdateLastInteraction must run despite earlier handler error")
+}
+
 func TestApplyTransition_ClearEndedAtRunsDespiteHandlerError(t *testing.T) {
 	t.Parallel()
 
