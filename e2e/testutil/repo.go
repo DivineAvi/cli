@@ -16,6 +16,8 @@ import (
 	"github.com/entireio/cli/e2e/entire"
 )
 
+const droidRepoSettingsPath = ".factory/settings.json"
+
 // RepoState holds the working state for a single test's cloned repository.
 type RepoState struct {
 	Agent            agents.Agent
@@ -25,6 +27,7 @@ type RepoState struct {
 	CheckpointBefore string
 	ConsoleLog       *os.File
 	session          agents.Session // interactive session, if started via StartSession
+	skipArtifacts    bool           // suppresses artifact capture on scenario restart
 }
 
 // SetupRepo creates a fresh git repository in a temporary directory, seeds it
@@ -64,6 +67,11 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	Git(t, dir, "commit", "--allow-empty", "-m", "initial commit")
 
 	entire.Enable(t, dir, agent.EntireAgent())
+	if agent.Name() == "factoryai-droid" {
+		if err := configureDroidRepoSettings(dir); err != nil {
+			t.Fatalf("configure droid repo settings: %v", err)
+		}
+	}
 	PatchSettings(t, dir, map[string]any{"log_level": "debug"})
 
 	// OpenCode's non-interactive mode auto-rejects external_directory permission
@@ -98,15 +106,132 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 
 	t.Cleanup(func() {
 		_ = consoleLog.Close()
-		CaptureArtifacts(t, state)
+		if !state.skipArtifacts {
+			CaptureArtifacts(t, state)
+		}
 	})
 
 	return state
 }
 
+func configureDroidRepoSettings(repoDir string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+
+	globalSettingsPath := filepath.Join(home, ".factory", "settings.json")
+	repoSettingsPath := filepath.Join(repoDir, droidRepoSettingsPath)
+
+	if err := mergeDroidCustomModels(globalSettingsPath, repoSettingsPath); err != nil {
+		return err
+	}
+	if err := ensureGitInfoExcludeContains(repoDir, droidRepoSettingsPath); err != nil {
+		return fmt.Errorf("exclude droid settings from git: %w", err)
+	}
+	return nil
+}
+
+func mergeDroidCustomModels(globalSettingsPath, repoSettingsPath string) error {
+	globalSettings, err := loadJSONMap(globalSettingsPath, "global droid settings")
+	if err != nil {
+		return err
+	}
+
+	customModels, ok := globalSettings["customModels"]
+	if !ok {
+		return fmt.Errorf(
+			"global droid settings at %s missing customModels; repo-local %s shadows global settings",
+			globalSettingsPath,
+			repoSettingsPath,
+		)
+	}
+
+	var models []json.RawMessage
+	if err := json.Unmarshal(customModels, &models); err != nil {
+		return fmt.Errorf("parse customModels in %s: %w", globalSettingsPath, err)
+	}
+	if len(models) == 0 {
+		return fmt.Errorf("global droid settings at %s has empty customModels", globalSettingsPath)
+	}
+
+	repoSettings, err := loadJSONMap(repoSettingsPath, "repo-local droid settings")
+	if err != nil {
+		return err
+	}
+	repoSettings["customModels"] = customModels
+
+	out, err := json.MarshalIndent(repoSettings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal repo-local droid settings: %w", err)
+	}
+	out = append(out, '\n')
+
+	if err := os.WriteFile(repoSettingsPath, out, 0o600); err != nil {
+		return fmt.Errorf("write repo-local droid settings %s: %w", repoSettingsPath, err)
+	}
+	return nil
+}
+
+func loadJSONMap(path, description string) (map[string]json.RawMessage, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s at %s: %w", description, path, err)
+	}
+
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, fmt.Errorf("parse %s at %s: %w", description, path, err)
+	}
+	if parsed == nil {
+		parsed = make(map[string]json.RawMessage)
+	}
+	return parsed, nil
+}
+
+func ensureGitInfoExcludeContains(repoDir, entry string) error {
+	excludePath := filepath.Join(repoDir, ".git", "info", "exclude")
+
+	data, err := os.ReadFile(excludePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", excludePath, err)
+	}
+
+	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+	for _, line := range strings.Split(normalized, "\n") {
+		if strings.TrimSpace(line) == entry {
+			return nil
+		}
+	}
+
+	var b strings.Builder
+	if len(data) > 0 {
+		b.Write(data)
+		if data[len(data)-1] != '\n' {
+			b.WriteByte('\n')
+		}
+	}
+	b.WriteString(entry)
+	b.WriteByte('\n')
+
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(excludePath), err)
+	}
+	if err := os.WriteFile(excludePath, []byte(b.String()), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", excludePath, err)
+	}
+	return nil
+}
+
 // ForEachAgent runs fn as a parallel subtest for every registered agent.
 // It handles repo setup, concurrency gating, context timeout, and cleanup.
 // The timeout is scaled by each agent's TimeoutMultiplier.
+//
+// If RunPrompt detects a transient API error (e.g. rate limit, token refresh
+// failure), it panics with errScenarioRestart. ForEachAgent recovers from the
+// panic and restarts the entire scenario with a fresh repository, up to
+// maxScenarioRestarts times. This avoids stale CLI session state from the
+// failed attempt poisoning the retry.
 func ForEachAgent(t *testing.T, timeout time.Duration, fn func(t *testing.T, s *RepoState, ctx context.Context)) {
 	t.Helper()
 	t.Parallel()
@@ -116,8 +241,6 @@ func ForEachAgent(t *testing.T, timeout time.Duration, fn func(t *testing.T, s *
 	}
 	for _, agent := range all {
 		t.Run(agent.Name(), func(t *testing.T) {
-			s := SetupRepo(t, agent)
-
 			// Use the global test deadline for slot wait so we don't
 			// skip prematurely — only bail if the whole binary is dying.
 			slotCtx := context.Background()
@@ -134,31 +257,76 @@ func ForEachAgent(t *testing.T, timeout time.Duration, fn func(t *testing.T, s *
 			// Per-test timeout starts after slot is acquired, scaled
 			// by the agent's multiplier (e.g. 2.5× for gemini).
 			scaled := time.Duration(float64(timeout) * agent.TimeoutMultiplier())
-			ctx, cancel := context.WithTimeout(context.Background(), scaled)
-			defer cancel()
-			fn(t, s, ctx)
+
+			var prevState *RepoState
+			for attempt := range maxScenarioRestarts + 1 {
+				s := SetupRepo(t, agent)
+				ctx, cancel := context.WithTimeout(context.Background(), scaled)
+
+				// On restart, suppress artifact capture from the previous
+				// failed attempt so it doesn't overwrite the final one.
+				if prevState != nil {
+					prevState.skipArtifacts = true
+				}
+
+				restarted := runScenario(t, s, ctx, fn)
+				cancel()
+
+				if !restarted {
+					return
+				}
+				prevState = s
+				if attempt >= maxScenarioRestarts {
+					t.Fatalf("exhausted %d scenario attempts due to transient API errors", maxScenarioRestarts+1)
+				}
+				t.Logf("transient error, restarting scenario (attempt %d/%d)", attempt+2, maxScenarioRestarts+1)
+			}
 		})
 	}
 }
 
+// runScenario runs the test function and recovers from errScenarioRestart
+// panics triggered by transient API errors in RunPrompt. Returns true if
+// the scenario should be restarted with a fresh repository.
+func runScenario(t *testing.T, s *RepoState, ctx context.Context, fn func(t *testing.T, s *RepoState, ctx context.Context)) (restarted bool) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(errScenarioRestart); ok {
+				restarted = true
+				return
+			}
+			panic(r) // re-panic for unexpected panics
+		}
+	}()
+	fn(t, s, ctx)
+	return false
+}
+
+const maxScenarioRestarts = 2 // restart up to 2 times = 3 total attempts
+
+// errScenarioRestart is panicked by RunPrompt when a transient API error is
+// detected. ForEachAgent recovers from this panic and restarts the test
+// scenario with a fresh repository, avoiding stale CLI state from the failed
+// attempt.
+type errScenarioRestart struct {
+	msg string
+}
+
 // RunPrompt runs an agent prompt, logs the command and output to ConsoleLog,
-// and returns the result. If the agent reports a transient API error, the
-// prompt is retried once after a short delay. The caller should still check err.
+// and returns the result. If the agent reports a transient API error, it
+// panics with errScenarioRestart to trigger a full scenario restart in
+// ForEachAgent (see runScenario).
 func (s *RepoState) RunPrompt(t *testing.T, ctx context.Context, prompt string, opts ...agents.Option) (agents.Output, error) {
 	t.Helper()
 	out, err := s.Agent.RunPrompt(ctx, s.Dir, prompt, opts...)
 	s.logPromptResult(out)
 
 	if err != nil && s.Agent.IsTransientError(out, err) {
-		t.Logf("transient API error detected, retrying in 5s: %v", err)
-		s.ConsoleLog.WriteString("> [retry] transient error, waiting 5s...\n")
-		select {
-		case <-time.After(5 * time.Second):
-		case <-ctx.Done():
-			return out, err
-		}
-		out, err = s.Agent.RunPrompt(ctx, s.Dir, prompt, opts...)
-		s.logPromptResult(out)
+		errMsg := fmt.Sprintf("transient API error (stderr: %s)", strings.TrimSpace(out.Stderr))
+		t.Logf("%s — restarting scenario", errMsg)
+		fmt.Fprintf(s.ConsoleLog, "> [transient] %s — restarting scenario\n", errMsg)
+		panic(errScenarioRestart{msg: errMsg})
 	}
 
 	return out, err
