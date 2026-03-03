@@ -686,13 +686,13 @@ func TestFindBranchCheckpoint_SquashMergeMultipleCheckpoints(t *testing.T) {
 		t.Fatalf("Failed to create squash commit: %v", err)
 	}
 
-	// Verify findBranchCheckpoint returns both checkpoint IDs
-	result, err := findBranchCheckpoint(repo, "master")
+	// Verify findBranchCheckpoints returns both checkpoint IDs
+	result, err := findBranchCheckpoints(repo, "master")
 	if err != nil {
-		t.Fatalf("findBranchCheckpoint() error = %v", err)
+		t.Fatalf("findBranchCheckpoints() error = %v", err)
 	}
 	if len(result.checkpointIDs) != 2 {
-		t.Fatalf("findBranchCheckpoint() returned %d checkpoint IDs, want 2", len(result.checkpointIDs))
+		t.Fatalf("findBranchCheckpoints() returned %d checkpoint IDs, want 2", len(result.checkpointIDs))
 	}
 	if result.checkpointIDs[0].String() != cpID1.String() {
 		t.Errorf("checkpointIDs[0] = %q, want %q", result.checkpointIDs[0].String(), cpID1.String())

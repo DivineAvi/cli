@@ -128,7 +128,7 @@ func resumeFromCurrentBranch(ctx context.Context, branchName string, force bool)
 	}
 
 	// Find a commit with an Entire-Checkpoint trailer, looking at branch-only commits
-	result, err := findBranchCheckpoint(repo, branchName)
+	result, err := findBranchCheckpoints(repo, branchName)
 	if err != nil {
 		return err
 	}
@@ -303,8 +303,8 @@ func deduplicateSessions(existing, incoming []strategy.RestoredSession) []strate
 	return existing
 }
 
-// branchCheckpointResult contains the result of searching for a checkpoint on a branch.
-type branchCheckpointResult struct {
+// branchCheckpointsResult contains the result of searching for checkpoints on a branch.
+type branchCheckpointsResult struct {
 	checkpointIDs     []id.CheckpointID
 	commitHash        string
 	commitMessage     string
@@ -312,11 +312,11 @@ type branchCheckpointResult struct {
 	newerCommitCount  int  // count of branch-only commits without checkpoints
 }
 
-// findBranchCheckpoint finds the most recent commit with an Entire-Checkpoint trailer
+// findBranchCheckpoints finds the most recent commit with an Entire-Checkpoint trailer
 // among commits that are unique to this branch (not reachable from the default branch).
 // This handles the case where main has been merged into the feature branch.
-func findBranchCheckpoint(repo *git.Repository, branchName string) (*branchCheckpointResult, error) {
-	result := &branchCheckpointResult{}
+func findBranchCheckpoints(repo *git.Repository, branchName string) (*branchCheckpointsResult, error) {
+	result := &branchCheckpointsResult{}
 
 	// Get HEAD commit
 	head, err := repo.Head()
@@ -385,8 +385,8 @@ func findBranchCheckpoint(repo *git.Repository, branchName string) (*branchCheck
 // Returns the first checkpoint found and info about commits between HEAD and the checkpoint.
 // It distinguishes between merge commits (bringing in other branches) and regular commits
 // (actual branch work) to avoid false warnings after merging main.
-func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branchCheckpointResult {
-	result := &branchCheckpointResult{}
+func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branchCheckpointsResult {
+	result := &branchCheckpointsResult{}
 	branchWorkCommits := 0 // Regular commits without checkpoints (actual work)
 	const maxCommits = 100 // Limit search depth
 	totalChecked := 0
