@@ -208,26 +208,11 @@ func resumeMultipleCheckpoints(ctx context.Context, repo *git.Repository, checkp
 		}
 	}
 
-	// Phase 1: Read metadata for all checkpoints
-	var checkpoints []*strategy.CheckpointInfo
-	for _, cpID := range checkpointIDs {
-		metadata, metaErr := strategy.ReadCheckpointMetadata(metadataTree, cpID.Path())
-		if metaErr != nil {
-			logging.Debug(logCtx, "skipping checkpoint without metadata",
-				slog.String("checkpoint_id", cpID.String()),
-				slog.String("error", metaErr.Error()),
-			)
-			continue
-		}
-		checkpoints = append(checkpoints, metadata)
-	}
+	// Read metadata for all checkpoints and sort by CreatedAt ascending
+	// (oldest first → newest writes last and wins on disk)
+	checkpoints := collectCheckpointsByAge(metadataTree, checkpointIDs)
 
-	// Phase 2: Sort by CreatedAt ascending (oldest first → newest writes last and wins on disk)
-	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].CreatedAt.Before(checkpoints[j].CreatedAt)
-	})
-
-	// Phase 3: Iterate sorted checkpoints and restore
+	// Iterate sorted checkpoints and restore
 	strat := GetStrategy(ctx)
 	var allSessions []strategy.RestoredSession
 
@@ -267,6 +252,25 @@ func resumeMultipleCheckpoints(ctx context.Context, repo *git.Repository, checkp
 	)
 
 	return displayRestoredSessions(allSessions)
+}
+
+// collectCheckpointsByAge reads metadata for each checkpoint ID from the tree,
+// skips any that can't be read, and returns them sorted by CreatedAt ascending.
+// Sorting ensures the newest checkpoint is restored last and wins on disk,
+// regardless of trailer order in the commit message.
+func collectCheckpointsByAge(tree *object.Tree, checkpointIDs []id.CheckpointID) []*strategy.CheckpointInfo {
+	var checkpoints []*strategy.CheckpointInfo
+	for _, cpID := range checkpointIDs {
+		metadata, err := strategy.ReadCheckpointMetadata(tree, cpID.Path())
+		if err != nil {
+			continue
+		}
+		checkpoints = append(checkpoints, metadata)
+	}
+	sort.Slice(checkpoints, func(i, j int) bool {
+		return checkpoints[i].CreatedAt.Before(checkpoints[j].CreatedAt)
+	})
+	return checkpoints
 }
 
 // deduplicateSessions merges new sessions into existing, keeping the one with the latest

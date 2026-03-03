@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -567,28 +566,15 @@ func TestResumeMultipleCheckpoints_SortsByCreatedAt(t *testing.T) {
 	cpID2 := createCheckpointOnMetadataBranchFull(t, repo, "session-middle", id.MustCheckpointID("ccc333ddd444"), t2)
 	cpID3 := createCheckpointOnMetadataBranchFull(t, repo, "session-newest", id.MustCheckpointID("eee555fff666"), t3)
 
-	// Read metadata in reverse order (simulating git CLI squash merge trailer order)
 	metadataTree, err := strategy.GetMetadataBranchTree(repo)
 	if err != nil {
 		t.Fatalf("Failed to get metadata branch tree: %v", err)
 	}
 
-	// Provide checkpoint IDs in reverse chronological order (newest first)
+	// Pass checkpoint IDs in reverse chronological order (newest first),
+	// simulating git CLI squash merge trailer order.
 	reverseOrderIDs := []id.CheckpointID{cpID3, cpID2, cpID1}
-
-	var checkpoints []*strategy.CheckpointInfo
-	for _, cpID := range reverseOrderIDs {
-		metadata, metaErr := strategy.ReadCheckpointMetadata(metadataTree, cpID.Path())
-		if metaErr != nil {
-			t.Fatalf("Failed to read metadata for %s: %v", cpID, metaErr)
-		}
-		checkpoints = append(checkpoints, metadata)
-	}
-
-	// Sort by CreatedAt ascending (same logic as resumeMultipleCheckpoints)
-	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].CreatedAt.Before(checkpoints[j].CreatedAt)
-	})
+	checkpoints := collectCheckpointsByAge(metadataTree, reverseOrderIDs)
 
 	// Verify: after sorting, oldest is first, newest is last
 	if len(checkpoints) != 3 {
